@@ -85,9 +85,41 @@ class TodoListApp(QMainWindow):
         # 从当前时间开始安排
         current_time = datetime.now().replace(minute=(datetime.now().minute // 5) * 5, second=0, microsecond=0)
         
+        def is_rest_time(dt):
+            """检查给定时间是否在休息时间段内"""
+            hour = dt.hour
+            if (2 <= hour < 8) or (12 <= hour < 14) or (18 <= hour < 19):
+                return True
+            return False
+        
+        def get_next_available_time(dt):
+            """获取下一个可用的时间点"""
+            if is_rest_time(dt):
+                if 2 <= dt.hour < 8:
+                    return dt.replace(hour=8, minute=0)
+                elif 12 <= dt.hour < 14:
+                    return dt.replace(hour=14, minute=0)
+                elif 18 <= dt.hour < 19:
+                    return dt.replace(hour=19, minute=0)
+            return dt
+        
         for item in self.todo_items:
+            # 确保开始时间不在休息时间段
+            current_time = get_next_available_time(current_time)
+            
+            # 检查任务是否会跨越休息时间
+            end_time = current_time + timedelta(minutes=item.duration)
+            test_time = current_time
+            while test_time < end_time:
+                if is_rest_time(test_time):
+                    # 如果任务会进入休息时间，则将开始时间调整到休息时间结束后
+                    current_time = get_next_available_time(test_time)
+                    end_time = current_time + timedelta(minutes=item.duration)
+                    test_time = current_time
+                test_time += timedelta(minutes=5)
+            
             item.scheduled_time = current_time
-            current_time += timedelta(minutes=item.duration)
+            current_time = end_time
         
         self.update_table()
 
