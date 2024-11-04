@@ -127,8 +127,15 @@ class TodoListApp(QMainWindow):
         self.table.setRowCount(len(self.todo_items))
         
         for row, item in enumerate(self.todo_items):
-            # 时间列
-            time_str = item.scheduled_time.strftime('%H:%M') if item.scheduled_time else '未安排'
+            # 时间列 - 显示起始时间
+            start_time = item.scheduled_time
+            end_time = start_time + timedelta(minutes=item.duration) if start_time else None
+            
+            if start_time and end_time:
+                time_str = f"{start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')}"
+            else:
+                time_str = '未安排'
+                
             self.table.setItem(row, 0, QTableWidgetItem(time_str))
             
             # 描述列
