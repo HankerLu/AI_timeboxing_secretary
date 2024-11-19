@@ -7,6 +7,8 @@ from PyQt5.QtCore import QTimer, Qt
 from zhipuai import ZhipuAI
 import json
 import asyncio
+import sqlite3
+from typing import Dict, List, Any
 
 class GUIManager:
     """GUI界面管理器"""
@@ -51,10 +53,133 @@ class GUIManager:
         if widget:
             widget.setEnabled(enabled)
 
+class CommandDatabase:
+    """指令集数据库管理器"""
+    def __init__(self):
+        self.conn = sqlite3.connect('commands.db')
+        self.cursor = self.conn.cursor()
+        self.init_database()
+        
+    def init_database(self):
+        """初始化数据库表"""
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS gui_commands (
+            id INTEGER PRIMARY KEY,
+            command_type TEXT NOT NULL,
+            command_name TEXT NOT NULL,
+            parameters TEXT,
+            description TEXT,
+            example TEXT
+        )
+        ''')
+        
+        # 预设指令集
+        default_commands = [
+            ('create_task', '创建任务', '{"task_name": "str", "duration": "int", "start_time": "str?"}', 
+             '创建一个新的任务', '创建一个写代码任务，持续60分钟'),
+            ('modify_task', '修改任务', '{"task_name": "str", "duration": "int?", "start_time": "str?"}',
+             '修改现有任务的属性', '将写代码任务的时间改为90分钟'),
+            ('delete_task', '删除任务', '{"task_name": "str"}',
+             '删除指定的任务', '删除写代码任务'),
+            ('clear_tasks', '清空任务', '{}',
+             '清空所有任务', '清空所有任务'),
+            ('start_timer', '开始计时', '{"task_name": "str?"}',
+             '开始任务计时', '开始当前任务的计时'),
+            ('pause_timer', '暂停计时', '{}',
+             '暂停当前任务的计时', '暂停计时'),
+            ('show_view', '切换视图', '{"view_name": "str"}',
+             '切换到指定的界面视图', '切换到任务列表视图')
+        ]
+        
+        self.cursor.executemany('''
+        INSERT OR IGNORE INTO gui_commands 
+        (command_type, command_name, parameters, description, example)
+        VALUES (?, ?, ?, ?, ?)
+        ''', default_commands)
+        
+        self.conn.commit()
+    
+    def get_command_info(self, command_type: str) -> Dict[str, Any]:
+        """获取指令信息"""
+        self.cursor.execute('''
+        SELECT command_type, command_name, parameters, description, example
+        FROM gui_commands
+        WHERE command_type = ?
+        ''', (command_type,))
+        
+        result = self.cursor.fetchone()
+        if result:
+            return {
+                'type': result[0],
+                'name': result[1],
+                'parameters': json.loads(result[2]),
+                'description': result[3],
+                'example': result[4]
+            }
+        return None
+    
+    def get_all_commands(self) -> List[Dict[str, Any]]:
+        """获取所有指令信息"""
+        self.cursor.execute('SELECT * FROM gui_commands')
+        results = self.cursor.fetchall()
+        return [{
+            'type': r[1],
+            'name': r[2],
+            'parameters': json.loads(r[3]),
+            'description': r[4],
+            'example': r[5]
+        } for r in results]
+    
+    def validate_command(self, command: Dict[str, Any]) -> bool:
+        """验证指令格式是否正确"""
+        cmd_info = self.get_command_info(command.get('type'))
+        if not cmd_info:
+            return False
+            
+        required_params = {k for k, v in cmd_info['parameters'].items() 
+                         if not v.endswith('?')}
+        actual_params = set(command.get('params', {}).keys())
+        
+        return required_params.issubset(actual_params)
+    
+    def get_prompt_template(self) -> str:
+        """生成用于智谱AI的prompt模板"""
+        commands = self.get_all_commands()
+        prompt = """你是一个任务规划助手。请将用户输入的自然语言描述转换为标准的任务指令。
+可用的指令集如下：
+
+"""
+        for cmd in commands:
+            prompt += f"- {cmd['name']}({cmd['type']}):\n"
+            prompt += f"  描述: {cmd['description']}\n"
+            prompt += f"  参数: {cmd['parameters']}\n"
+            prompt += f"  示例: {cmd['example']}\n\n"
+        
+        prompt += """
+请将用户输入转换为以下JSON格式：
+{
+    "commands": [
+        {
+            "type": "指令类型",
+            "params": {
+                "参数名": "参数值"
+            }
+        }
+    ]
+}
+
+注意：
+1. 时间参数必须转换为标准格式（HH:MM或分钟数）
+2. 指令类型必须是上述列表中的其中之一
+3. 参数必须符合指令的要求
+"""
+        return prompt
+
 class CommandParser:
     """指令解析器"""
     def __init__(self, planner):
         self.planner = planner
+        self.db = CommandDatabase()
         self.commands = {
             'create_task': self.create_task,
             'add_time': self.add_time,
@@ -67,39 +192,19 @@ class CommandParser:
     async def parse_natural_language(self, text):
         """解析自然语言输入为指令"""
         try:
+            prompt_template = self.db.get_prompt_template()
+            
             response = self.planner.client.chat.completions.create(
                 model="glm-4",
                 messages=[
-                    {"role": "system", "content": """
-                        你是一个任务规划助手。请将用户输入的自然语言描述转换为标准的任务列表。
-                        请严格按照以下JSON格式返回：
-                        {
-                            "commands": [
-                                {
-                                    "type": "create_task",
-                                    "params": {
-                                        "task_name": "任务名称",
-                                        "duration": 数字,
-                                        "start_time": "HH:MM"
-                                    }
-                                }
-                            ]
-                        }
-                        
-                        注意：
-                        1. duration必须是纯数字（分钟数）
-                        2. start_time必须是24小时制的时间格式
-                        3. 必须严格按照这个JSON格式返回，不要添加任何额外的说明文字
-                    """},
+                    {"role": "system", "content": prompt_template},
                     {"role": "user", "content": f"请解析以下任务描述：\n{text}"}
                 ]
             )
             
-            # 获取响应内容
             response_text = response.choices[0].message.content
-            print(f"AI响应: {response_text}")  # 调试输出
+            print(f"AI响应: {response_text}")
             
-            # 尝试清理响应文本，去除可能的前后缀
             cleaned_text = response_text.strip()
             if cleaned_text.startswith("```json"):
                 cleaned_text = cleaned_text[7:]
@@ -107,9 +212,17 @@ class CommandParser:
                 cleaned_text = cleaned_text[:-3]
             cleaned_text = cleaned_text.strip()
             
-            # 解析JSON
             parsed_commands = json.loads(cleaned_text)
-            return parsed_commands['commands']
+            
+            # 验证每个指令
+            valid_commands = []
+            for cmd in parsed_commands['commands']:
+                if self.db.validate_command(cmd):
+                    valid_commands.append(cmd)
+                else:
+                    print(f"无效指令: {cmd}")
+                    
+            return valid_commands
             
         except Exception as e:
             print(f"解析错误: {str(e)}")
@@ -182,6 +295,7 @@ class DailyPlanner(QMainWindow):
     def __init__(self):
         super().__init__()
         self.gui = GUIManager(self)
+        self.command_db = CommandDatabase()  # 初始化指令数据库
         self.command_parser = CommandParser(self)
         self.tasks = []  # 存储任务列表
         
