@@ -5,6 +5,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QLabel, QHeaderView, QHBoxLayout, QStackedWidget)
 from PyQt5.QtCore import QTimer, Qt
 from zhipuai import ZhipuAI
+import json
+import asyncio
 
 class GUIManager:
     """GUI界面管理器"""
@@ -49,15 +51,145 @@ class GUIManager:
         if widget:
             widget.setEnabled(enabled)
 
+class CommandParser:
+    """指令解析器"""
+    def __init__(self, planner):
+        self.planner = planner
+        self.commands = {
+            'create_task': self.create_task,
+            'add_time': self.add_time,
+            'clear_tasks': self.clear_tasks,
+            'start_now': self.start_now,
+            'modify_task': self.modify_task,
+            'delete_task': self.delete_task
+        }
+        
+    async def parse_natural_language(self, text):
+        """解析自然语言输入为指令"""
+        try:
+            response = self.planner.client.chat.completions.create(
+                model="glm-4",
+                messages=[
+                    {"role": "system", "content": """
+                        你是一个任务规划助手。请将用户输入的自然语言描述转换为标准的任务列表。
+                        请严格按照以下JSON格式返回：
+                        {
+                            "commands": [
+                                {
+                                    "type": "create_task",
+                                    "params": {
+                                        "task_name": "任务名称",
+                                        "duration": 数字,
+                                        "start_time": "HH:MM"
+                                    }
+                                }
+                            ]
+                        }
+                        
+                        注意：
+                        1. duration必须是纯数字（分钟数）
+                        2. start_time必须是24小时制的时间格式
+                        3. 必须严格按照这个JSON格式返回，不要添加任何额外的说明文字
+                    """},
+                    {"role": "user", "content": f"请解析以下任务描述：\n{text}"}
+                ]
+            )
+            
+            # 获取响应内容
+            response_text = response.choices[0].message.content
+            print(f"AI响应: {response_text}")  # 调试输出
+            
+            # 尝试清理响应文本，去除可能的前后缀
+            cleaned_text = response_text.strip()
+            if cleaned_text.startswith("```json"):
+                cleaned_text = cleaned_text[7:]
+            if cleaned_text.endswith("```"):
+                cleaned_text = cleaned_text[:-3]
+            cleaned_text = cleaned_text.strip()
+            
+            # 解析JSON
+            parsed_commands = json.loads(cleaned_text)
+            return parsed_commands['commands']
+            
+        except Exception as e:
+            print(f"解析错误: {str(e)}")
+            print(f"原始响应: {response_text if 'response_text' in locals() else 'None'}")
+            return [{"type": "error", "params": {"message": f"解析失败：{str(e)}"}}]
+    
+    def execute_commands(self, commands):
+        """执行指令列表"""
+        results = []
+        for cmd in commands:
+            try:
+                cmd_type = cmd.get('type')
+                if cmd_type == 'error':
+                    results.append(cmd['params'])
+                    continue
+                    
+                if cmd_type in self.commands:
+                    params = cmd.get('params', {})
+                    print(f"执行命令: {cmd_type}, 参数: {params}")  # 调试输出
+                    
+                    # 处理start_time
+                    if 'start_time' in params:
+                        try:
+                            current_date = datetime.now().date()
+                            time_str = params['start_time']
+                            time_obj = datetime.strptime(time_str, "%H:%M").time()
+                            params['start_time'] = datetime.combine(current_date, time_obj)
+                        except Exception as e:
+                            print(f"时间转换错误: {str(e)}")
+                            
+                    result = self.commands[cmd_type](**params)
+                    results.append(result)
+            except Exception as e:
+                print(f"命令执行错误: {str(e)}")
+                results.append({"status": "error", "message": f"执行失败：{str(e)}"})
+                
+        return results
+    
+    def create_task(self, task_name, duration, start_time=None, priority=None):
+        """创建任务"""
+        task = {
+            'name': task_name,
+            'duration': duration,
+            'start_time': start_time,
+            'priority': priority
+        }
+        return self.planner.add_task(task)
+    
+    def add_time(self, task_name, duration):
+        """添加时间到现有任务"""
+        return self.planner.modify_task_duration(task_name, duration)
+    
+    def clear_tasks(self):
+        """清空任务列表"""
+        return self.planner.clear_all_tasks()
+    
+    def start_now(self):
+        """立即开始当前任务列表"""
+        return self.planner.start_schedule()
+    
+    def modify_task(self, task_name, **modifications):
+        """修改任务属性"""
+        return self.planner.modify_task(task_name, modifications)
+    
+    def delete_task(self, task_name):
+        """删除任务"""
+        return self.planner.delete_task(task_name)
+
 class DailyPlanner(QMainWindow):
     def __init__(self):
         super().__init__()
         self.gui = GUIManager(self)
+        self.command_parser = CommandParser(self)
+        self.tasks = []  # 存储任务列表
+        
         self.setup_ui()
         self.setup_connections()
         
         # 初始化智谱AI客户端
-        self.client = ZhipuAI(api_key="your_api_key_here")
+        self.client = ZhipuAI(api_key="e64b996267bee6ba0252a5d46a143ff4.3RZ8v4qZ2DbYoJbk")
         
         # 初始化计时器
         self.timer = QTimer()
@@ -188,17 +320,19 @@ class DailyPlanner(QMainWindow):
         self.start_timer()
 
     def start_timer(self):
-        if self.schedule_table.rowCount() > 0:
+        """启动计时器"""
+        schedule_table = self.gui.get_widget('schedule_table')
+        if schedule_table.rowCount() > 0:
             current_time = datetime.now()
             
             # 找到当前应该执行的任务
-            for row in range(self.schedule_table.rowCount()):
-                start_time = datetime.strptime(self.schedule_table.item(row, 0).text(), "%H:%M").replace(
+            for row in range(schedule_table.rowCount()):
+                start_time = datetime.strptime(schedule_table.item(row, 0).text(), "%H:%M").replace(
                     year=current_time.year,
                     month=current_time.month,
                     day=current_time.day
                 )
-                end_time = datetime.strptime(self.schedule_table.item(row, 1).text(), "%H:%M").replace(
+                end_time = datetime.strptime(schedule_table.item(row, 1).text(), "%H:%M").replace(
                     year=current_time.year,
                     month=current_time.month,
                     day=current_time.day
@@ -206,7 +340,10 @@ class DailyPlanner(QMainWindow):
                 
                 if start_time <= current_time <= end_time:
                     self.current_task_end_time = end_time
-                    self.current_task_label.setText(f"当前任务：{self.schedule_table.item(row, 2).text()}")
+                    current_task = self.gui.get_widget('current_task')
+                    time_remaining = self.gui.get_widget('time_remaining')
+                    
+                    current_task.setText(f"当前任务：{schedule_table.item(row, 2).text()}")
                     self.timer.start(1000)  # 每秒更新一次
                     break
     
@@ -226,38 +363,113 @@ class DailyPlanner(QMainWindow):
                 self.start_timer()
     
     def parse_with_ai(self):
-        """使用智谱AI解析用户输入的自然语言描述"""
-        user_input = self.task_input.toPlainText()
+        """处理AI解析按钮点击事件"""
+        user_input = self.gui.get_widget('task_input').toPlainText()
         if not user_input.strip():
             return
-            
-        prompt = """请将以下自然语言描述转换为标准的任务时间格式。
-输出格式要求：每行一个任务，格式为"任务名称 时间"
-时间使用min或h为单位。例如：
-写代码 30min
-开会 1h
-
-用户输入："""
         
         try:
-            response = self.client.chat.completions.create(
-                model="glm-4",
-                messages=[
-                    {"role": "system", "content": "你是一个任务规划助手，帮助用户将自然语言转换为标准的任务时间格式。"},
-                    {"role": "user", "content": prompt + user_input}
-                ]
-            )
+            print(f"处理用户输入: {user_input}")  # 调试输出
             
-            parsed_text = response.choices[0].message.content
-            self.task_input.setText(parsed_text)
+            # 清空现有任务
+            self.clear_all_tasks()
+            
+            # 处理自然语言输入
+            results = asyncio.run(self.process_natural_language(user_input))
+            print(f"处理结果: {results}")  # 调试输出
+            
+            # 显示处理结果
+            result_messages = []
+            for result in results:
+                if isinstance(result, dict):
+                    message = result.get('message', str(result))
+                    result_messages.append(message)
+            
+            if result_messages:
+                # 保持原始输入，添加处理结果
+                original_input = user_input
+                result_text = "\n\n处理结果：\n" + "\n".join(result_messages)
+                self.gui.get_widget('task_input').setText(original_input + result_text)
+                
+                # 更新显示并启动计时器
+                self._update_schedule_display()
+                self.start_timer()
+            else:
+                self.gui.get_widget('task_input').setText(user_input + "\n\n解析失败：未能生成有效的任务")
             
         except Exception as e:
-            self.task_input.setText(f"AI解析失败：{str(e)}")
+            print(f"AI解析错误: {str(e)}")
+            self.gui.get_widget('task_input').setText(user_input + f"\n\n处理失败：{str(e)}")
 
     def update_task_status(self, task_name, remaining_time):
         """更新任务状态显示"""
         self.gui.get_widget('current_task').setText(f"当前任务：{task_name}")
         self.gui.get_widget('time_remaining').setText(f"剩余时间：{remaining_time}")
+
+    def add_task(self, task):
+        """添加任务到列表"""
+        self.tasks.append(task)
+        self._update_schedule_display()
+        return {"status": "success", "message": f"已添加任务：{task['name']}"}
+    
+    def modify_task_duration(self, task_name, duration):
+        """修改任务时长"""
+        for task in self.tasks:
+            if task['name'] == task_name:
+                task['duration'] = duration
+                self._update_schedule_display()
+                return {"status": "success", "message": f"已修改任务时长：{task_name}"}
+        return {"status": "error", "message": f"未找到任务：{task_name}"}
+    
+    def clear_all_tasks(self):
+        """清空所有任务"""
+        self.tasks = []
+        self._update_schedule_display()
+        return {"status": "success", "message": "已清空所有任务"}
+    
+    def modify_task(self, task_name, modifications):
+        """修改任务属性"""
+        for task in self.tasks:
+            if task['name'] == task_name:
+                task.update(modifications)
+                self._update_schedule_display()
+                return {"status": "success", "message": f"已修改任务：{task_name}"}
+        return {"status": "error", "message": f"未找到任务：{task_name}"}
+    
+    def delete_task(self, task_name):
+        """删除任务"""
+        for i, task in enumerate(self.tasks):
+            if task['name'] == task_name:
+                self.tasks.pop(i)
+                self._update_schedule_display()
+                return {"status": "success", "message": f"已删除任务：{task_name}"}
+        return {"status": "error", "message": f"未找到任务：{task_name}"}
+    
+    def _update_schedule_display(self):
+        """更新界面显示"""
+        schedule_table = self.gui.get_widget('schedule_table')
+        schedule_table.setRowCount(0)
+        
+        current_time = datetime.now().replace(second=0, microsecond=0)
+        
+        for task in self.tasks:
+            row = schedule_table.rowCount()
+            schedule_table.insertRow(row)
+            
+            start_time = task.get('start_time', current_time)
+            end_time = start_time + timedelta(minutes=task['duration'])
+            
+            schedule_table.setItem(row, 0, QTableWidgetItem(start_time.strftime("%H:%M")))
+            schedule_table.setItem(row, 1, QTableWidgetItem(end_time.strftime("%H:%M")))
+            schedule_table.setItem(row, 2, QTableWidgetItem(task['name']))
+            
+            current_time = end_time
+    
+    async def process_natural_language(self, text):
+        """处理自然语言输入"""
+        commands = await self.command_parser.parse_natural_language(text)
+        results = self.command_parser.execute_commands(commands)
+        return results
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
