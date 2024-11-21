@@ -192,37 +192,65 @@ class CommandParser:
     async def parse_natural_language(self, text):
         """解析自然语言输入为指令"""
         try:
-            prompt_template = self.db.get_prompt_template()
+            prompt_template = self.db.get_prompt_template() + """
+当用户没有明确指定时间时，请按照以下规则处理：
+1. 如果没有指定开始时间，默认从当前时间开始
+2. 如果没有指定持续时间，根据任务类型估算：
+   - 短会议/休息: 15-30分钟
+   - 一般任务: 45-60分钟
+   - 复杂任务: 90-120分钟
+3. 总是返回完整的JSON格式响应
+
+示例响应：
+{
+    "commands": [
+        {
+            "type": "create_task",
+            "params": {
+                "task_name": "写报告",
+                "duration": 60,
+                "start_time": "14:30"
+            }
+        }
+    ]
+}
+"""
+            
+            current_time = datetime.now()
             
             response = self.planner.client.chat.completions.create(
                 model="glm-4",
                 messages=[
                     {"role": "system", "content": prompt_template},
-                    {"role": "user", "content": f"请解析以下任务描述：\n{text}"}
+                    {"role": "user", "content": f"当前时间是{current_time.strftime('%H:%M')}，请解析以下任务描述：\n{text}"}
                 ]
             )
             
             response_text = response.choices[0].message.content
             print(f"AI响应: {response_text}")
             
-            cleaned_text = response_text.strip()
-            if cleaned_text.startswith("```json"):
-                cleaned_text = cleaned_text[7:]
-            if cleaned_text.endswith("```"):
-                cleaned_text = cleaned_text[:-3]
-            cleaned_text = cleaned_text.strip()
-            
-            parsed_commands = json.loads(cleaned_text)
+            # 提取JSON部分
+            try:
+                # 尝试直接解析
+                parsed_commands = json.loads(response_text)
+            except json.JSONDecodeError:
+                # 如果失败，尝试提取JSON部分
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', response_text)
+                if json_match:
+                    parsed_commands = json.loads(json_match.group())
+                else:
+                    raise ValueError("无法从响应中提取有效的JSON")
             
             # 验证每个指令
             valid_commands = []
-            for cmd in parsed_commands['commands']:
+            for cmd in parsed_commands.get('commands', []):
                 if self.db.validate_command(cmd):
                     valid_commands.append(cmd)
                 else:
                     print(f"无效指令: {cmd}")
                     
-            return valid_commands
+            return valid_commands if valid_commands else [{"type": "error", "params": {"message": "未能生成有效的任务指令"}}]
             
         except Exception as e:
             print(f"解析错误: {str(e)}")
@@ -232,6 +260,8 @@ class CommandParser:
     def execute_commands(self, commands):
         """执行指令列表"""
         results = []
+        current_time = datetime.now()
+        
         for cmd in commands:
             try:
                 cmd_type = cmd.get('type')
@@ -243,15 +273,24 @@ class CommandParser:
                     params = cmd.get('params', {})
                     print(f"执行命令: {cmd_type}, 参数: {params}")  # 调试输出
                     
-                    # 处理start_time
-                    if 'start_time' in params:
-                        try:
-                            current_date = datetime.now().date()
-                            time_str = params['start_time']
-                            time_obj = datetime.strptime(time_str, "%H:%M").time()
-                            params['start_time'] = datetime.combine(current_date, time_obj)
-                        except Exception as e:
-                            print(f"时间转换错误: {str(e)}")
+                    # 处理缺失的参数
+                    if cmd_type == 'create_task':
+                        if 'duration' not in params:
+                            # 默认设置为60分钟
+                            params['duration'] = 60
+                        
+                        if 'start_time' not in params:
+                            # 如果没有指定开始时间，使用当前时间
+                            params['start_time'] = current_time
+                        else:
+                            # 处理start_time
+                            try:
+                                time_str = params['start_time']
+                                time_obj = datetime.strptime(time_str, "%H:%M").time()
+                                params['start_time'] = datetime.combine(current_time.date(), time_obj)
+                            except Exception as e:
+                                print(f"时间转换错误: {str(e)}")
+                                params['start_time'] = current_time
                             
                     result = self.commands[cmd_type](**params)
                     results.append(result)
