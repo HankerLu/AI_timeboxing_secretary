@@ -146,32 +146,38 @@ class CommandDatabase:
         """生成用于智谱AI的prompt模板"""
         commands = self.get_all_commands()
         prompt = """你是一个任务规划助手。请将用户输入的自然语言描述转换为标准的任务指令。
-可用的指令集如下：
+严格按照JSON格式返回，不要包含任何其他解释性文字。
+
+可用的指令如下：
 
 """
         for cmd in commands:
-            prompt += f"- {cmd['name']}({cmd['type']}):\n"
-            prompt += f"  描述: {cmd['description']}\n"
-            prompt += f"  参数: {cmd['parameters']}\n"
-            prompt += f"  示例: {cmd['example']}\n\n"
+            prompt += f"指令：{cmd['name']}\n"
+            prompt += f"类型：{cmd['type']}\n"
+            prompt += f"参数：{json.dumps(cmd['parameters'], ensure_ascii=False)}\n"
+            prompt += f"示例：{cmd['example']}\n\n"
         
         prompt += """
-请将用户输入转换为以下JSON格式：
+输出要求：
+1. 只返回JSON格式数据
+2. 使用双引号而不是单引号
+3. 不要添加注释或说明
+4. 确保所有必需参数都有值
+5. 数值类型使用数字而不是字符串
+
+示例输出格式：
 {
     "commands": [
         {
-            "type": "指令类型",
+            "type": "create_task",
             "params": {
-                "参数名": "参数值"
+                "task_name": "写报告",
+                "duration": 60,
+                "start_time": "14:30"
             }
         }
     ]
 }
-
-注意：
-1. 时间参数必须转换为标准格式（HH:MM或分钟数）
-2. 指令类型必须是上述列表中的其中之一
-3. 参数必须符合指令的要求
 """
         return prompt
 
@@ -192,69 +198,106 @@ class CommandParser:
     async def parse_natural_language(self, text):
         """解析自然语言输入为指令"""
         try:
+            # 优化后的prompt模板
             prompt_template = self.db.get_prompt_template() + """
-当用户没有明确指定时间时，请按照以下规则处理：
-1. 如果没有指定开始时间，默认从当前时间开始
-2. 如果没有指定持续时间，根据任务类型估算：
-   - 短会议/休息: 15-30分钟
-   - 一般任务: 45-60分钟
-   - 复杂任务: 90-120分钟
-3. 总是返回完整的JSON格式响应
-
-示例响应：
+请严格按照以下JSON格式返回，不要包含任何其他解释性文字：
 {
     "commands": [
         {
-            "type": "create_task",
+            "type": "指令类型",
             "params": {
-                "task_name": "写报告",
-                "duration": 60,
-                "start_time": "14:30"
+                "参数名": "参数值"
             }
         }
     ]
 }
+
+注意事项：
+1. 只返回JSON，不要有其他文字
+2. 确保JSON格式完全正确
+3. 所有字符串使用双引号
 """
-            
             current_time = datetime.now()
             
             response = self.planner.client.chat.completions.create(
                 model="glm-4",
                 messages=[
                     {"role": "system", "content": prompt_template},
-                    {"role": "user", "content": f"当前时间是{current_time.strftime('%H:%M')}，请解析以下任务描述：\n{text}"}
+                    {"role": "user", "content": f"当前时间是{current_time.strftime('%H:%M')}，请解析：{text}"}
                 ]
             )
             
-            response_text = response.choices[0].message.content
-            print(f"AI响应: {response_text}")
+            response_text = response.choices[0].message.content.strip()
             
-            # 提取JSON部分
+            # 改进的JSON提取和解析逻辑
+            def extract_json(text):
+                # 1. 尝试直接解析
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+                
+                # 2. 尝试提取最外层的花括号内容
+                try:
+                    import re
+                    json_pattern = r'\{(?:[^{}]|(?R))*\}'
+                    matches = re.finditer(json_pattern, text, re.DOTALL)
+                    for match in matches:
+                        try:
+                            return json.loads(match.group())
+                        except json.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+                
+                # 3. 尝试清理常见问题后解析
+                try:
+                    # 替换单引号为双引号
+                    cleaned_text = text.replace("'", '"')
+                    # 移除可能的Unicode字符
+                    cleaned_text = cleaned_text.encode('ascii', 'ignore').decode()
+                    # 移除注释和多余空白
+                    cleaned_text = re.sub(r'//.*?\n|/\*.*?\*/', '', cleaned_text, flags=re.DOTALL)
+                    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+                    return json.loads(cleaned_text)
+                except json.JSONDecodeError:
+                    pass
+                
+                raise ValueError("无法提取有效的JSON")
+
             try:
-                # 尝试直接解析
-                parsed_commands = json.loads(response_text)
-            except json.JSONDecodeError:
-                # 如果失败，尝试提取JSON部分
-                import re
-                json_match = re.search(r'\{[\s\S]*\}', response_text)
-                if json_match:
-                    parsed_commands = json.loads(json_match.group())
-                else:
-                    raise ValueError("无法从响应中提取有效的JSON")
-            
-            # 验证每个指令
+                parsed_commands = extract_json(response_text)
+            except Exception as e:
+                print(f"JSON解析失败: {str(e)}")
+                print(f"原始响应: {response_text}")
+                # 尝试构建基本的错误响应
+                return [{"type": "error", "params": {"message": "无法解析AI响应"}}]
+
+            # 验证和清理命令
             valid_commands = []
             for cmd in parsed_commands.get('commands', []):
-                if self.db.validate_command(cmd):
-                    valid_commands.append(cmd)
-                else:
-                    print(f"无效指令: {cmd}")
+                try:
+                    # 规范化命令格式
+                    normalized_cmd = {
+                        'type': str(cmd.get('type', '')).strip().lower(),
+                        'params': {
+                            k: str(v).strip() if isinstance(v, str) else v
+                            for k, v in cmd.get('params', {}).items()
+                        }
+                    }
+                    
+                    if self.db.validate_command(normalized_cmd):
+                        valid_commands.append(normalized_cmd)
+                    else:
+                        print(f"无效指令: {cmd}")
+                except Exception as e:
+                    print(f"命令规范化失败: {str(e)}")
+                    continue
                     
             return valid_commands if valid_commands else [{"type": "error", "params": {"message": "未能生成有效的任务指令"}}]
             
         except Exception as e:
             print(f"解析错误: {str(e)}")
-            print(f"原始响应: {response_text if 'response_text' in locals() else 'None'}")
             return [{"type": "error", "params": {"message": f"解析失败：{str(e)}"}}]
     
     def execute_commands(self, commands):
@@ -501,16 +544,19 @@ class DailyPlanner(QMainWindow):
                     break
     
     def update_timer(self):
+        """更新计时器显示"""
         if self.current_task_end_time:
             remaining = self.current_task_end_time - datetime.now()
             if remaining.total_seconds() > 0:
                 minutes = int(remaining.total_seconds() // 60)
                 seconds = int(remaining.total_seconds() % 60)
-                self.time_remaining_label.setText(f"剩余时间：{minutes:02d}:{seconds:02d}")
+                # 使用GUI管理器获取标签
+                self.gui.get_widget('time_remaining').setText(f"剩余时间：{minutes:02d}:{seconds:02d}")
             else:
                 self.timer.stop()
-                self.current_task_label.setText("当前任务：已完成")
-                self.time_remaining_label.setText("剩余时间：00:00")
+                # 使用GUI管理器获取标签
+                self.gui.get_widget('current_task').setText("当前任务：已完成")
+                self.gui.get_widget('time_remaining').setText("剩余时间：00:00")
                 self.current_task_end_time = None
                 # 自动开始下一个任务
                 self.start_timer()
