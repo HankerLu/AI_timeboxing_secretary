@@ -198,24 +198,26 @@ class CommandParser:
     async def parse_natural_language(self, text):
         """解析自然语言输入为指令"""
         try:
-            # 优化后的prompt模板
-            prompt_template = self.db.get_prompt_template() + """
-请严格按照以下JSON格式返回，不要包含任何其他解释性文字：
-{
-    "commands": [
-        {
-            "type": "指令类型",
-            "params": {
-                "参数名": "参数值"
-            }
-        }
-    ]
-}
+            # 简化的prompt模板
+            prompt_template = """你是一个任务规划助手。请将用户输入的自然语言描述转换为任务列表。
+每个任务需要包含:
+1. 任务名称
+2. 持续时间(分钟)
+3. 开始时间(可选)
 
-注意事项：
-1. 只返回JSON，不要有其他文字
-2. 确保JSON格式完全正确
-3. 所有字符串使用双引号
+请按以下格式返回(每行一个任务):
+任务名称|持续时间|开始时间(可选)
+
+示例输出:
+写代码|60|14:30
+开会|30
+写文档|45
+
+注意:
+- 使用竖线(|)分隔各项
+- 时间格式为HH:MM
+- 如果没有指定开始时间可以省略
+- 只返回任务列表,不要其他说明文字
 """
             current_time = datetime.now()
             
@@ -229,72 +231,43 @@ class CommandParser:
             
             response_text = response.choices[0].message.content.strip()
             
-            # 改进的JSON提取和解析逻辑
-            def extract_json(text):
-                # 1. 尝试直接解析
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-                
-                # 2. 尝试提取最外层的花括号内容
-                try:
-                    import re
-                    json_pattern = r'\{(?:[^{}]|(?R))*\}'
-                    matches = re.finditer(json_pattern, text, re.DOTALL)
-                    for match in matches:
-                        try:
-                            return json.loads(match.group())
-                        except json.JSONDecodeError:
-                            continue
-                except Exception:
-                    pass
-                
-                # 3. 尝试清理常见问题后解析
-                try:
-                    # 替换单引号为双引号
-                    cleaned_text = text.replace("'", '"')
-                    # 移除可能的Unicode字符
-                    cleaned_text = cleaned_text.encode('ascii', 'ignore').decode()
-                    # 移除注释和多余空白
-                    cleaned_text = re.sub(r'//.*?\n|/\*.*?\*/', '', cleaned_text, flags=re.DOTALL)
-                    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-                    return json.loads(cleaned_text)
-                except json.JSONDecodeError:
-                    pass
-                
-                raise ValueError("无法提取有效的JSON")
-
-            try:
-                parsed_commands = extract_json(response_text)
-            except Exception as e:
-                print(f"JSON解析失败: {str(e)}")
-                print(f"原始响应: {response_text}")
-                # 尝试构建基本的错误响应
-                return [{"type": "error", "params": {"message": "无法解析AI响应"}}]
-
-            # 验证和清理命令
-            valid_commands = []
-            for cmd in parsed_commands.get('commands', []):
-                try:
-                    # 规范化命令格式
-                    normalized_cmd = {
-                        'type': str(cmd.get('type', '')).strip().lower(),
-                        'params': {
-                            k: str(v).strip() if isinstance(v, str) else v
-                            for k, v in cmd.get('params', {}).items()
-                        }
-                    }
-                    
-                    if self.db.validate_command(normalized_cmd):
-                        valid_commands.append(normalized_cmd)
-                    else:
-                        print(f"无效指令: {cmd}")
-                except Exception as e:
-                    print(f"命令规范化失败: {str(e)}")
+            # 解析返回的任务列表
+            commands = []
+            for line in response_text.split('\n'):
+                if not line.strip():
                     continue
                     
-            return valid_commands if valid_commands else [{"type": "error", "params": {"message": "未能生成有效的任务指令"}}]
+                parts = line.strip().split('|')
+                if len(parts) < 2:
+                    continue
+                    
+                task_name = parts[0].strip()
+                try:
+                    duration = int(parts[1].strip())
+                except ValueError:
+                    continue
+                    
+                command = {
+                    "type": "create_task",
+                    "params": {
+                        "task_name": task_name,
+                        "duration": duration
+                    }
+                }
+                
+                # 如果有指定开始时间
+                if len(parts) > 2 and parts[2].strip():
+                    try:
+                        time_str = parts[2].strip()
+                        time_obj = datetime.strptime(time_str, "%H:%M").time()
+                        start_time = datetime.combine(current_time.date(), time_obj)
+                        command["params"]["start_time"] = start_time
+                    except ValueError:
+                        pass
+                    
+                commands.append(command)
+                
+            return commands if commands else [{"type": "error", "params": {"message": "未能识别任何有效任务"}}]
             
         except Exception as e:
             print(f"解析错误: {str(e)}")
