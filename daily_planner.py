@@ -623,12 +623,27 @@ class DailyPlanner(QMainWindow):
         schedule_table.setRowCount(0)
         
         current_time = datetime.now().replace(second=0, microsecond=0)
+        buffer_time = timedelta(minutes=5)  # 添加5分钟缓冲时间
         
-        for task in self.tasks:
+        for i, task in enumerate(self.tasks):
             row = schedule_table.rowCount()
             schedule_table.insertRow(row)
             
-            start_time = task.get('start_time', current_time)
+            # 第一个任务使用指定的开始时间或当前时间
+            if i == 0:
+                start_time = task.get('start_time', current_time)
+            else:
+                # 后续任务的开始时间为前一个任务的结束时间加上缓冲时间
+                prev_end_time = datetime.strptime(
+                    schedule_table.item(row-1, 1).text(), 
+                    "%H:%M"
+                ).replace(
+                    year=current_time.year,
+                    month=current_time.month,
+                    day=current_time.day
+                )
+                start_time = prev_end_time + buffer_time
+            
             end_time = start_time + timedelta(minutes=task['duration'])
             
             schedule_table.setItem(row, 0, QTableWidgetItem(start_time.strftime("%H:%M")))
