@@ -198,26 +198,35 @@ class CommandParser:
     async def parse_natural_language(self, text):
         """解析自然语言输入为指令"""
         try:
-            # 简化的prompt模板
+            # 更新prompt模板，加入休息时间的约束
             prompt_template = """你是一个任务规划助手。请将用户输入的自然语言描述转换为任务列表。
 每个任务需要包含:
 1. 任务名称
 2. 持续时间(分钟)
 3. 开始时间(可选)
 
-请按以下格式返回(每行一个任务):
-任务名称|持续时间|开始时间(可选)
+特殊约束:
+- 12:00-14:00 和 18:00-19:00 是休息时间，不应该安排任务
+- 如果任务会与休息时间冲突，需要：
+  a) 调整任务顺序避免冲突
+  b) 或将任务分成两部分（在任务名后添加"_上半段"和"_下半段"）
+  c) 或将任务移到休息时间之后
 
-示例输出:
-写代码|60|14:30
-开会|30
-写文档|45
+请按以下格式返回(每行一个任务):
+任务名称|持续时间|开始时间
 
 注意:
 - 使用竖线(|)分隔各项
 - 时间格式为HH:MM
-- 如果没有指定开始时间可以省略
+- 必须指定开始时间以避免休息时间冲突
+- 如果任务被分割，确保两部分的总时间等于原始时间
 - 只返回任务列表,不要其他说明文字
+
+示例输出:
+写代码|60|10:00
+开会_上半段|30|11:00
+开会_下半段|30|14:00
+写文档|45|15:00
 """
             current_time = datetime.now()
             
@@ -225,7 +234,7 @@ class CommandParser:
                 model="glm-4",
                 messages=[
                     {"role": "system", "content": prompt_template},
-                    {"role": "user", "content": f"当前时间是{current_time.strftime('%H:%M')}，请解析：{text}"}
+                    {"role": "user", "content": f"当前时间是{current_time.strftime('%H:%M')}，请解析并合理安排这些任务，注意避开休息时间：{text}"}
                 ]
             )
             
@@ -238,35 +247,29 @@ class CommandParser:
                     continue
                     
                 parts = line.strip().split('|')
-                if len(parts) < 2:
+                if len(parts) < 3:  # 现在必须包含开始时间
                     continue
                     
                 task_name = parts[0].strip()
                 try:
                     duration = int(parts[1].strip())
+                    time_str = parts[2].strip()
+                    time_obj = datetime.strptime(time_str, "%H:%M").time()
+                    start_time = datetime.combine(current_time.date(), time_obj)
+                    
+                    command = {
+                        "type": "create_task",
+                        "params": {
+                            "task_name": task_name,
+                            "duration": duration,
+                            "start_time": start_time
+                        }
+                    }
+                    commands.append(command)
+                    
                 except ValueError:
                     continue
-                    
-                command = {
-                    "type": "create_task",
-                    "params": {
-                        "task_name": task_name,
-                        "duration": duration
-                    }
-                }
-                
-                # 如果有指定开始时间
-                if len(parts) > 2 and parts[2].strip():
-                    try:
-                        time_str = parts[2].strip()
-                        time_obj = datetime.strptime(time_str, "%H:%M").time()
-                        start_time = datetime.combine(current_time.date(), time_obj)
-                        command["params"]["start_time"] = start_time
-                    except ValueError:
-                        pass
-                    
-                commands.append(command)
-                
+            
             return commands if commands else [{"type": "error", "params": {"message": "未能识别任何有效任务"}}]
             
         except Exception as e:
