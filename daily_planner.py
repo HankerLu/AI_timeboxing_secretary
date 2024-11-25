@@ -73,6 +73,27 @@ class CommandDatabase:
         )
         ''')
         
+        # 添加任务表
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            duration INTEGER NOT NULL,
+            start_time TEXT,
+            priority INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # 添加输入内容表
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS input_content (
+            id INTEGER PRIMARY KEY,
+            content TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
         # 预设指令集
         default_commands = [
             ('create_task', '创建任务', '{"task_name": "str", "duration": "int", "start_time": "str?"}', 
@@ -353,9 +374,9 @@ class DailyPlanner(QMainWindow):
     def __init__(self):
         super().__init__()
         self.gui = GUIManager(self)
-        self.command_db = CommandDatabase()  # 初始化指令数据库
+        self.command_db = CommandDatabase()
         self.command_parser = CommandParser(self)
-        self.tasks = []  # 存储任务列表
+        self.tasks = []
         
         self.setup_ui()
         self.setup_connections()
@@ -367,6 +388,10 @@ class DailyPlanner(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
         self.current_task_end_time = None
+        
+        # 加载保存的任务和输入内容
+        self.load_tasks()
+        self.load_input_content()
 
     def setup_ui(self):
         """设置UI界面"""
@@ -569,12 +594,18 @@ class DailyPlanner(QMainWindow):
                 # 更新显示并启动计时器
                 self._update_schedule_display()
                 self.start_timer()
+                
+                # 保存输入内容
+                self.save_input_content()
             else:
-                self.gui.get_widget('task_input').setText(user_input + "\n\n解析失败：未能生成有效的任务")
+                error_text = user_input + "\n\n解析失败：未能生成有效的任务"
+                self.gui.get_widget('task_input').setText(error_text)
+                self.save_input_content()
             
         except Exception as e:
-            print(f"AI解析错误: {str(e)}")
-            self.gui.get_widget('task_input').setText(user_input + f"\n\n处理失败：{str(e)}")
+            error_text = user_input + f"\n\n处理失败：{str(e)}"
+            self.gui.get_widget('task_input').setText(error_text)
+            self.save_input_content()
 
     def update_task_status(self, task_name, remaining_time):
         """更新任务状态显示"""
@@ -585,6 +616,7 @@ class DailyPlanner(QMainWindow):
         """添加任务到列表"""
         self.tasks.append(task)
         self._update_schedule_display()
+        self.save_tasks()  # 自动保存
         return {"status": "success", "message": f"已添加任务：{task['name']}"}
     
     def modify_task_duration(self, task_name, duration):
@@ -600,6 +632,7 @@ class DailyPlanner(QMainWindow):
         """清空所有任务"""
         self.tasks = []
         self._update_schedule_display()
+        self.save_tasks()  # 自动保存
         return {"status": "success", "message": "已清空所有任务"}
     
     def modify_task(self, task_name, modifications):
@@ -608,6 +641,7 @@ class DailyPlanner(QMainWindow):
             if task['name'] == task_name:
                 task.update(modifications)
                 self._update_schedule_display()
+                self.save_tasks()  # 自动保存
                 return {"status": "success", "message": f"已修改任务：{task_name}"}
         return {"status": "error", "message": f"未找到任务：{task_name}"}
     
@@ -617,6 +651,7 @@ class DailyPlanner(QMainWindow):
             if task['name'] == task_name:
                 self.tasks.pop(i)
                 self._update_schedule_display()
+                self.save_tasks()  # 自动保存
                 return {"status": "success", "message": f"已删除任务：{task_name}"}
         return {"status": "error", "message": f"未找到任务：{task_name}"}
     
@@ -660,6 +695,87 @@ class DailyPlanner(QMainWindow):
         commands = await self.command_parser.parse_natural_language(text)
         results = self.command_parser.execute_commands(commands)
         return results
+
+    def save_tasks(self):
+        """保存任务到数据库"""
+        try:
+            cursor = self.command_db.conn.cursor()
+            # 清空现有任务
+            cursor.execute('DELETE FROM tasks')
+            
+            # 保存当前任务列表
+            for task in self.tasks:
+                cursor.execute('''
+                INSERT INTO tasks (name, duration, start_time, priority)
+                VALUES (?, ?, ?, ?)
+                ''', (
+                    task['name'],
+                    task['duration'],
+                    task['start_time'].strftime('%Y-%m-%d %H:%M:%S') if task.get('start_time') else None,
+                    task.get('priority')
+                ))
+            
+            self.command_db.conn.commit()
+            return True
+        except Exception as e:
+            print(f"保存任务失败: {str(e)}")
+            return False
+
+    def load_tasks(self):
+        """从数据库加载任务"""
+        try:
+            cursor = self.command_db.conn.cursor()
+            cursor.execute('SELECT name, duration, start_time, priority FROM tasks ORDER BY id')
+            
+            self.tasks = []
+            for row in cursor.fetchall():
+                task = {
+                    'name': row[0],
+                    'duration': row[1],
+                    'priority': row[3]
+                }
+                
+                # 处理开始时间
+                if row[2]:
+                    task['start_time'] = datetime.strptime(row[2], '%Y-%m-%d %H:%M:%S')
+                
+                self.tasks.append(task)
+                
+            self._update_schedule_display()
+            return True
+        except Exception as e:
+            print(f"加载任务失败: {str(e)}")
+            return False
+
+    def save_input_content(self):
+        """保存输入区域的内容"""
+        try:
+            content = self.gui.get_widget('task_input').toPlainText()
+            cursor = self.command_db.conn.cursor()
+            
+            # 清空现有内容并保存新内容
+            cursor.execute('DELETE FROM input_content')
+            cursor.execute('INSERT INTO input_content (content) VALUES (?)', (content,))
+            
+            self.command_db.conn.commit()
+            return True
+        except Exception as e:
+            print(f"保存输入内容失败: {str(e)}")
+            return False
+
+    def load_input_content(self):
+        """加载输入区域的内容"""
+        try:
+            cursor = self.command_db.conn.cursor()
+            cursor.execute('SELECT content FROM input_content ORDER BY updated_at DESC LIMIT 1')
+            
+            result = cursor.fetchone()
+            if result:
+                self.gui.get_widget('task_input').setText(result[0])
+            return True
+        except Exception as e:
+            print(f"加载输入内容失败: {str(e)}")
+            return False
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
