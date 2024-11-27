@@ -26,11 +26,8 @@ def build_app():
             '--windowed',
             '--clean',
             '--add-data', f'commands.db:.',
+            '-i', 'app_icon.icns',  # 添加图标选项
         ]
-        
-        # 如果有图标文件，添加图标
-        if os.path.exists('app_icon.icns'):
-            command.extend(['--icon', 'app_icon.icns'])
         
         # 修改为 M1 芯片的 macOS 特定选项
         command.extend([
@@ -56,43 +53,14 @@ def build_app():
         # 执行打包命令
         subprocess.run(command, check=True)
         
-        # 创建发布包
+        # 将生成的可执行文件复制到当前目录
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        release_name = f'DailyPlanner_release_{timestamp}'
-        release_path = os.path.join('dist', release_name)
-        
-        # 创建发布目录
-        os.makedirs(release_path, exist_ok=True)
-        
-        # 复制文件到发布目录
-        shutil.copy2(os.path.join('dist', 'DailyPlanner'), release_path)
-        if os.path.exists('commands.db'):
-            shutil.copy2('commands.db', release_path)
-        
-        # 创建说明文件
-        with open(os.path.join(release_path, 'README.txt'), 'w', encoding='utf-8') as f:
-            f.write('''每日计划管理器
-
-使用说明：
-1. 运行 DailyPlanner 启动程序
-2. 在输入区域输入任务描述
-3. 点击"AI解析输入"按钮生成计划
-4. 程序会自动保存任务和输入内容
-
-注意事项：
-- 首次运行时会自动创建数据库文件
-- 请勿删除程序目录下的 commands.db 文件
-- 如遇到问题，请确保程序所在目录具有写入权限
-- 如果提示"无法打开"，请在系统偏好设置中允许来自任何来源的应用
-
-版本：1.0
-发布日期：''' + datetime.now().strftime('%Y-%m-%d'))
-        
-        # 创建压缩包
-        shutil.make_archive(release_path, 'zip', release_path)
+        output_name = f'DailyPlanner_{timestamp}'
+        shutil.copy2(os.path.join('dist', 'DailyPlanner'), output_name)
         
         print(f"\n构建完成！")
-        print(f"发布包位置: {release_path}.zip")
+        print(f"可执行文件位置: {output_name}")
+        
         return True
         
     except Exception as e:
@@ -108,12 +76,7 @@ if __name__ == '__main__':
     # 构建应用
     if build_app():
         print("""
-构建成功！请检查 dist 目录下的发布包。
-
-发布包包含：
-- DailyPlanner (主程序)
-- commands.db (数据库文件)
-- README.txt (使用说明)
+构建成功！可执行文件已生成在当前目录。
 
 注意事项：
 1. 如果系统提示"无法打开"，请在系统偏好设置的安全性与隐私中允许打开
