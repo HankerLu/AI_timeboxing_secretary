@@ -82,6 +82,8 @@ class CommandDatabase:
             duration INTEGER NOT NULL,
             start_time TEXT,
             priority INTEGER,
+            completed BOOLEAN DEFAULT 0,
+            completed_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -411,6 +413,9 @@ class DailyPlanner(QMainWindow):
         # 加载保存的任务和输入内容
         self.load_tasks()
         self.load_input_content()
+        
+        # 添加任务完成日志文件路径
+        self.task_log_file = "task_completion_log.txt"
 
     def setup_ui(self):
         """设置UI界面"""
@@ -459,9 +464,12 @@ class DailyPlanner(QMainWindow):
         """设置计划表格"""
         table_label = self.gui.create_widget('table_label', QLabel, text="今日计划：")
         schedule_table = self.gui.create_widget('schedule_table', QTableWidget)
-        schedule_table.setColumnCount(3)
-        schedule_table.setHorizontalHeaderLabels(["开始时间", "结束时间", "任务"])
+        schedule_table.setColumnCount(4)
+        schedule_table.setHorizontalHeaderLabels(["开始时间", "结束时间", "任务", "完成状态"])
         schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # 连接单元格变化信号
+        schedule_table.cellChanged.connect(self.handle_task_completion)
         
         parent_layout.addWidget(table_label)
         parent_layout.addWidget(schedule_table)
@@ -575,7 +583,7 @@ class DailyPlanner(QMainWindow):
             else:
                 self.timer.stop()
                 # 使用GUI管理器获取标签
-                self.gui.get_widget('current_task').setText("当前任务：���完成")
+                self.gui.get_widget('current_task').setText("当前任务：完成")
                 self.gui.get_widget('time_remaining').setText("剩余时间：00:00")
                 self.current_task_end_time = None
                 # 自动开始下一个任务
@@ -679,7 +687,10 @@ class DailyPlanner(QMainWindow):
         schedule_table.setRowCount(0)
         
         current_time = datetime.now().replace(second=0, microsecond=0)
-        buffer_time = timedelta(minutes=5)  # 添加5分钟缓冲时间
+        buffer_time = timedelta(minutes=5)
+        
+        # 暂时断开 cellChanged 信号连接，避免触发不必要的更新
+        schedule_table.cellChanged.disconnect(self.handle_task_completion)
         
         for i, task in enumerate(self.tasks):
             row = schedule_table.rowCount()
@@ -702,11 +713,26 @@ class DailyPlanner(QMainWindow):
             
             end_time = start_time + timedelta(minutes=task['duration'])
             
+            # 设置各列的内容
             schedule_table.setItem(row, 0, QTableWidgetItem(start_time.strftime("%H:%M")))
             schedule_table.setItem(row, 1, QTableWidgetItem(end_time.strftime("%H:%M")))
             schedule_table.setItem(row, 2, QTableWidgetItem(task['name']))
             
+            # 添加复选框
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.Checked if task.get('completed') else Qt.Unchecked)
+            
+            # 如果任务已完成，显示完成时间
+            if task.get('completed') and task.get('completed_at'):
+                checkbox_item.setText(task['completed_at'].strftime("%H:%M"))
+            
+            schedule_table.setItem(row, 3, checkbox_item)
+            
             current_time = end_time
+        
+        # 重新连接 cellChanged 信号
+        schedule_table.cellChanged.connect(self.handle_task_completion)
     
     async def process_natural_language(self, text):
         """处理自然语言输入"""
@@ -718,19 +744,19 @@ class DailyPlanner(QMainWindow):
         """保存任务到数据库"""
         try:
             cursor = self.command_db.conn.cursor()
-            # 清空现有任务
             cursor.execute('DELETE FROM tasks')
             
-            # 保存当前任务列表
             for task in self.tasks:
                 cursor.execute('''
-                INSERT INTO tasks (name, duration, start_time, priority)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO tasks (name, duration, start_time, priority, completed, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     task['name'],
                     task['duration'],
                     task['start_time'].strftime('%Y-%m-%d %H:%M:%S') if task.get('start_time') else None,
-                    task.get('priority')
+                    task.get('priority'),
+                    task.get('completed', False),
+                    task['completed_at'].strftime('%Y-%m-%d %H:%M:%S') if task.get('completed_at') else None
                 ))
             
             self.command_db.conn.commit()
@@ -743,19 +769,27 @@ class DailyPlanner(QMainWindow):
         """从数据库加载任务"""
         try:
             cursor = self.command_db.conn.cursor()
-            cursor.execute('SELECT name, duration, start_time, priority FROM tasks ORDER BY id')
+            cursor.execute('''
+            SELECT name, duration, start_time, priority, completed, completed_at 
+            FROM tasks ORDER BY id
+            ''')
             
             self.tasks = []
             for row in cursor.fetchall():
                 task = {
                     'name': row[0],
                     'duration': row[1],
-                    'priority': row[3]
+                    'priority': row[3],
+                    'completed': bool(row[4])
                 }
                 
                 # 处理开始时间
                 if row[2]:
                     task['start_time'] = datetime.strptime(row[2], '%Y-%m-%d %H:%M:%S')
+                
+                # 处理完成时间
+                if row[5]:
+                    task['completed_at'] = datetime.strptime(row[5], '%Y-%m-%d %H:%M:%S')
                 
                 self.tasks.append(task)
                 
@@ -805,6 +839,79 @@ class DailyPlanner(QMainWindow):
         self.command_db.conn.close()
         # 退出应用
         QApplication.quit()
+
+    def handle_task_completion(self, row, column):
+        """处理任务完成状态变化"""
+        schedule_table = self.gui.get_widget('schedule_table')
+        
+        # 只处理完成状态列的变化
+        if column == 3:
+            item = schedule_table.item(row, column)
+            if item and item.checkState() == Qt.Checked:
+                task_name = schedule_table.item(row, 2).text()
+                start_time = schedule_table.item(row, 0).text()
+                end_time = schedule_table.item(row, 1).text()
+                completed_time = datetime.now()
+                
+                # 更新任务状态并记录
+                self.mark_task_completed(task_name, completed_time, start_time, end_time)
+                
+                # 从表格和任务列表中移除该任务
+                self.remove_completed_task(row, task_name)
+
+    def remove_completed_task(self, row, task_name):
+        """移除已完成的任务"""
+        schedule_table = self.gui.get_widget('schedule_table')
+        
+        # 从表格中移除
+        schedule_table.removeRow(row)
+        
+        # 从任务列表中移除
+        self.tasks = [task for task in self.tasks if task['name'] != task_name]
+        
+        # 保存更新后的任务列表
+        self.save_tasks()
+
+    def mark_task_completed(self, task_name, completed_time, start_time, end_time):
+        """标记任务为已完成并记录到日志"""
+        try:
+            # 更新数据库
+            cursor = self.command_db.conn.cursor()
+            cursor.execute('''
+            UPDATE tasks 
+            SET completed = 1, completed_at = ? 
+            WHERE name = ?
+            ''', (completed_time.strftime("%Y-%m-%d %H:%M:%S"), task_name))
+            
+            self.command_db.conn.commit()
+            
+            # 更新内存中的任务状态
+            for task in self.tasks:
+                if task['name'] == task_name:
+                    task['completed'] = True
+                    task['completed_at'] = completed_time
+                    break
+            
+            # 记录到日志文件
+            self.log_task_completion(task_name, start_time, end_time, completed_time)
+                
+        except Exception as e:
+            print(f"更新任务状态失败: {str(e)}")
+
+    def log_task_completion(self, task_name, start_time, end_time, completed_time):
+        """记录任务完成信息到日志文件"""
+        try:
+            with open(self.task_log_file, 'a', encoding='utf-8') as f:
+                log_entry = (
+                    f"任务: {task_name}\n"
+                    f"计划开始时间: {start_time}\n"
+                    f"计划结束时间: {end_time}\n"
+                    f"实际完成时间: {completed_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"{'='*50}\n"
+                )
+                f.write(log_entry)
+        except Exception as e:
+            print(f"写入任务日志失败: {str(e)}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
