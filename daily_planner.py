@@ -9,6 +9,7 @@ import json
 import asyncio
 import sqlite3
 from typing import Dict, List, Any
+import signal
 
 class GUIManager:
     """GUI界面管理器"""
@@ -393,6 +394,9 @@ class DailyPlanner(QMainWindow):
         self.command_parser = CommandParser(self)
         self.tasks = []
         
+        # 添加信号处理
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
         self.setup_ui()
         self.setup_connections()
         
@@ -571,7 +575,7 @@ class DailyPlanner(QMainWindow):
             else:
                 self.timer.stop()
                 # 使用GUI管理器获取标签
-                self.gui.get_widget('current_task').setText("当前任务：已完成")
+                self.gui.get_widget('current_task').setText("当前任务：���完成")
                 self.gui.get_widget('time_remaining').setText("剩余时间：00:00")
                 self.current_task_end_time = None
                 # 自动开始下一个任务
@@ -791,8 +795,25 @@ class DailyPlanner(QMainWindow):
             print(f"加载输入内容失败: {str(e)}")
             return False
 
+    def signal_handler(self, signum, frame):
+        """处理 Control+C 信号"""
+        print("\n正在保存数据并关闭应用...")
+        # 保存当前状态
+        self.save_tasks()
+        self.save_input_content()
+        # 关闭数据库连接
+        self.command_db.conn.close()
+        # 退出应用
+        QApplication.quit()
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = DailyPlanner()
     window.show()
+    
+    # 确保在Qt事件循环中也能处理信号
+    timer = QTimer()
+    timer.start(500)  # 每500ms检查一次信号
+    timer.timeout.connect(lambda: None)  # 保持事件循环运行
+    
     sys.exit(app.exec_()) 
