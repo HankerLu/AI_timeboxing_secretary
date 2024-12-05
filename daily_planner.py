@@ -301,7 +301,9 @@ class CommandParser:
         results = []
         current_time = datetime.now()
         
+        cnt = 0
         for cmd in commands:
+            # print(f"执行第{cnt}条指令")
             try:
                 cmd_type = cmd.get('type')
                 if cmd_type == 'error':
@@ -315,18 +317,29 @@ class CommandParser:
                     # 处理缺失的参数
                     if cmd_type == 'create_task':
                         if 'duration' not in params:
-                            # 默认设置为60分钟
                             params['duration'] = 60
                         
                         if 'start_time' not in params:
-                            # 如果没有指定开始时间，使用当前时间
                             params['start_time'] = current_time
                         else:
-                            # 处理start_time
+                            # 处理start_time，支持多种格式
                             try:
-                                time_str = params['start_time']
-                                time_obj = datetime.strptime(time_str, "%H:%M").time()
-                                params['start_time'] = datetime.combine(current_time.date(), time_obj)
+                                start_time = params['start_time']
+                                if isinstance(start_time, str):
+                                    if 'datetime.datetime' in start_time:
+                                        # 处理 "datetime.datetime(2024, 12, 5, 18, 0)" 格式
+                                        time_parts = start_time.split('(')[1].split(')')[0].split(',')
+                                        year, month, day, hour, minute = map(int, time_parts)
+                                        params['start_time'] = datetime(year, month, day, hour, minute)
+                                    else:
+                                        # 处理 "HH:MM" 格式
+                                        time_obj = datetime.strptime(start_time, "%H:%M").time()
+                                        params['start_time'] = datetime.combine(current_time.date(), time_obj)
+                                elif isinstance(start_time, datetime):
+                                    # 如果已经是datetime对象，直接使用
+                                    params['start_time'] = start_time
+                                else:
+                                    params['start_time'] = current_time
                             except Exception as e:
                                 print(f"时间转换错误: {str(e)}")
                                 params['start_time'] = current_time
@@ -347,6 +360,7 @@ class CommandParser:
             'start_time': start_time,
             'priority': priority
         }
+        # print(f"创建任务=========: {task}")
         return self.planner.add_task(task)
     
     def add_time(self, task_name, duration):
@@ -575,7 +589,7 @@ class DailyPlanner(QMainWindow):
             
             # 处理自然语言输入
             results = asyncio.run(self.process_natural_language(user_input))
-            print(f"处理结果: {results}")  # 调试输出
+            # print(f"处理结果: {results}")  # 调试输出
             
             # 显示处理结果
             result_messages = []
@@ -587,8 +601,7 @@ class DailyPlanner(QMainWindow):
             if result_messages:
                 # 保持原始输入，添加处理结果
                 original_input = user_input
-                result_text = "\n\n处理结果：\n" + "\n".join(result_messages)
-                self.gui.get_widget('task_input').setText(original_input + result_text)
+                self.gui.get_widget('task_input').setText(original_input)
                 
                 # 更新显示并启动计时器
                 self._update_schedule_display()
