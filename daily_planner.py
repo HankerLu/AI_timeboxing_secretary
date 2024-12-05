@@ -206,7 +206,6 @@ class CommandParser:
     """指令解析器"""
     def __init__(self, planner):
         self.planner = planner
-        self.db = CommandDatabase()
         self.commands = {
             'create_task': self.create_task,
             'add_time': self.add_time,
