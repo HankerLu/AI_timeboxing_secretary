@@ -60,6 +60,7 @@ class CommandDatabase:
         self.conn = sqlite3.connect('commands.db')
         self.cursor = self.conn.cursor()
         self.init_database()
+        self.migrate_database()
         
     def init_database(self):
         """初始化数据库表"""
@@ -122,6 +123,23 @@ class CommandDatabase:
         ''', default_commands)
         
         self.conn.commit()
+    
+    def migrate_database(self):
+        """迁移数据库结构"""
+        try:
+            # 检查 completed 列是否存在
+            self.cursor.execute("PRAGMA table_info(tasks)")
+            columns = [column[1] for column in self.cursor.fetchall()]
+            
+            if 'completed' not in columns:
+                self.cursor.execute('ALTER TABLE tasks ADD COLUMN completed BOOLEAN DEFAULT 0')
+            
+            if 'completed_at' not in columns:
+                self.cursor.execute('ALTER TABLE tasks ADD COLUMN completed_at TEXT')
+            
+            self.conn.commit()
+        except Exception as e:
+            print(f"数据库迁移失败: {str(e)}")
     
     def get_command_info(self, command_type: str) -> Dict[str, Any]:
         """获取指令信息"""
